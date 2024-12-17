@@ -1,0 +1,440 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: Nima_java  
+
+Resources:
+  # SaveApiUrlInParameterStore:
+  #   Type: AWS::SSM::Parameter
+  #   Properties:
+  #     Name: /apiURL
+  #     Type: String
+  #     Value: !Sub https://${EventHandlerApi}.execute-api.${AWS::Region}.amazonaws.com/QA/powerlimit
+
+  ConfigurationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: ALARM! There is a problem with the configuration for sites/chargers
+      ActionsEnabled: true
+      Namespace: ConfigurationErrors
+      MetricName: ConfigurationErrorCount
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      DatapointsToAlarm: 1
+      AlarmActions:
+        - !Ref SystemErrorsTopic
+
+  SwitchErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: ALARM! There is a problem with connecting to Switch
+      ActionsEnabled: true
+      Namespace: SwitchErrors
+      MetricName: SwitchErrorCount
+      Statistic: Sum
+      Period: 60 # Check every minute
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      DatapointsToAlarm: 1
+      AlarmActions:
+        - !Ref SystemErrorsTopic
+
+  DriivzErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: ALARM! There is a problem with connecting to the Driivz API
+      ActionsEnabled: true
+      Namespace: ConnectionErrors
+      MetricName: ConnectionErrorCount
+      Statistic: Sum
+      Period: 60 # Check every minute
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      DatapointsToAlarm: 1
+      AlarmActions:
+        - !Ref SystemErrorsTopic
+
+  SubscriptionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: ALARM! There is a problem with the webhook subscription
+      ActionsEnabled: true
+      Namespace: SubscriptionErrors
+      MetricName: SubscriptionErrorCount
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      DatapointsToAlarm: 1
+      AlarmActions:
+        - !Ref SystemErrorsTopic
+
+  ConfigurationMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      MetricTransformations:
+        - MetricName: ConfigurationErrorCount
+          MetricValue: '1'
+          MetricNamespace: ConfigurationErrors
+      FilterPattern: ALARM TRIGGER Configuration Error
+      LogGroupName: !Sub /aws/lambda/${HandlePowerLimitFunction}
+
+  ConnectionMonitorMectricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      MetricTransformations:
+        - MetricName: ConnectionErrorCount
+          MetricValue: '1'
+          MetricNamespace: ConnectionErrors
+      FilterPattern: ALARM TRIGGER Driivz Error
+      LogGroupName: !Sub /aws/lambda/${ConnectionMonitorFunction}
+
+  SwitchMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      MetricTransformations:
+        - MetricName: SwitchErrorCount
+          MetricValue: '1'
+          MetricNamespace: SwitchErrors
+      FilterPattern: ALARM TRIGGER Switch Error
+      LogGroupName: !Sub /aws/lambda/${HandlePowerLimitFunction}
+
+  SubscriptionMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      MetricTransformations:
+        - MetricName: SubscriptionErrorCount
+          MetricValue: '1'
+          MetricNamespace: SubscriptionErrors
+      FilterPattern: ALARM TRIGGER Subscription Error
+      LogGroupName: !Sub /aws/lambda/${CheckSubscriptionFunction}
+      
+  SystemErrorsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Power Limit Error!
+      
+  ErrorSubscriptionEmail:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SystemErrorsTopic
+      Protocol: email
+      Endpoint: "lisa.arvidsson@knowit.se"
+
+  CustomDomainMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: nima.knowitcloud.se # our custom domain, do not forget to update
+      RestApiId: !Ref EventHandlerApi
+
+  EventHandlerApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub
+        - ${ResourceName} From Stack ${AWS::StackName}
+        - ResourceName: EventHandlerApi
+      StageName: prod
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            FunctionArn: !GetAtt WebhookTokenAuthorizerFunction.Arn
+            Identity:
+              Headers:
+                - Authorization 
+
+  ReceivePowerLimitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: ReceivePowerLimitFunction
+      CodeUri: .
+      Handler: function.ReceivePowerLimit::handleRequest
+      Runtime: java17
+      MemorySize: 3008
+      Timeout: 120
+      Tracing: Active
+      Environment:
+        Variables:
+          POWERLIMITEVENTS_TABLE_NAME: !Ref PowerLimitEvents
+          POWERLIMITEVENTS_TABLE_ARN: !GetAtt PowerLimitEvents.Arn
+          HANDLEPOWERLIMITFUNCTION_FUNCTION_NAME: !Ref HandlePowerLimitFunction
+          HANDLEPOWERLIMITFUNCTION_FUNCTION_ARN: !GetAtt HandlePowerLimitFunction.Arn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PowerLimitEvents
+        - LambdaInvokePolicy:
+            FunctionName: !Ref HandlePowerLimitFunction
+      Events:
+        EventHandlerApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref EventHandlerApi
+            Path: /prod/powerlimit
+            Method: POST
+            Auth:
+              Authorizer: LambdaTokenAuthorizer
+        EventHandlerApiQA:
+          Type: Api
+          Properties:
+            RestApiId: !Ref EventHandlerApi
+            Path: /qa/powerlimit
+            Method: POST
+            Auth:
+              Authorizer: LambdaTokenAuthorizer
+  ReceivePowerLimitFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ReceivePowerLimitFunction}
+      RetentionInDays: 3
+
+  WebhookTokenAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: function.WebhookTokenAuthorizer::handleRequest
+      Runtime: java17
+      MemorySize: 128
+      Timeout: 60 #has to be at least 30sek to work with ssmClient
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameters
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/BearerToken # Must be the same as in CheckSubscriptionFunction!!
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/BearerToken # Must be the same as in CheckSubscriptionFunction!!
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource:
+                - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/e449cd4b-182d-4a82-a0ff-0998beaa635f
+  WebhookTokenAuthorizerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${WebhookTokenAuthorizerFunction}
+      RetentionInDays: 3
+
+  PowerLimitEvents:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: eventId
+          AttributeType: S
+        - AttributeName: powerLimitRequester
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: eventId
+          KeyType: HASH
+        - AttributeName: powerLimitRequester
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  RecurringAlarmTimestampTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: alarmName
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: alarmName
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  HandlePowerLimitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: HandlePowerLimitFunction
+      CodeUri: .
+      Handler: function.HandlePowerLimit::handleRequest
+      Runtime: java17
+      MemorySize: 3008
+      Timeout: 120
+      Tracing: Active
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          POWERLIMITEVENTS_TABLE_NAME: !Ref PowerLimitEvents
+          POWERLIMITEVENTS_TABLE_ARN: !GetAtt PowerLimitEvents.Arn
+          RECURRING_ALARM_TABLE_NAME: !Ref RecurringAlarmTimestampTable
+          RECURRING_ALARM_TABLE_NAME_ARN: !GetAtt RecurringAlarmTimestampTable.Arn
+          SWITCH_ALARM: !Ref SwitchErrorAlarm
+          CONFIG_ALARM: !Ref ConfigurationErrorAlarm
+          DRIIVZ_ALARM: !Ref DriivzErrorAlarm
+          SUBSCRIPTION_ALARM: !Ref SubscriptionErrorAlarm
+          SNS_TOPIC_ARN: !Ref SystemErrorsTopic
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PowerLimitEvents
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecurringAlarmTimestampTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameters
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Config
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DriivzBaseURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DriivzUsername
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DriivzPassword
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/ClientID
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/ClientSecret
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/GrantType
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/OAuthTokenURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/ScopeURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/SwitchBaseURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Config
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/ClientID
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/ClientSecret
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/GrantType
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/OAuthTokenURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/ScopeURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/SwitchBaseURL
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource:
+                - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/e449cd4b-182d-4a82-a0ff-0998beaa635f
+            - Effect: Allow
+              Action: "cloudwatch:DescribeAlarms"
+              Resource:
+                - !GetAtt ConfigurationErrorAlarm.Arn
+                - !GetAtt DriivzErrorAlarm.Arn
+                - !GetAtt SwitchErrorAlarm.Arn
+                - !GetAtt SubscriptionErrorAlarm.Arn
+
+            - Effect: Allow
+              Action: "sns:Publish"
+              Resource:
+                - !Ref SystemErrorsTopic
+
+      Events:
+        Schedule1:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0/4 * * * ? *)
+  HandlePowerLimitFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${HandlePowerLimitFunction}
+      RetentionInDays: 3
+
+  ConnectionMonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: ConnectionMonitorFunction
+      CodeUri: .
+      Handler: function.ConnectionMonitor::handleRequest
+      Runtime: java17
+      MemorySize: 3008
+      Timeout: 30
+      Tracing: Active
+      Events:
+        Schedule1:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 0 ? * * *)
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameters
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DriivzBaseURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DriivzUsername
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DriivzPassword
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource:
+                - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/e449cd4b-182d-4a82-a0ff-0998beaa635f
+  ConnectionMonitorFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ConnectionMonitorFunction}
+      RetentionInDays: 3
+
+  CheckSubscriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: CheckSubscriptionFunction
+      CodeUri: .
+      Handler: function.CheckSubscription::handleRequest
+      Runtime: java17
+      MemorySize: 3008
+      Timeout: 60
+      Tracing: Active
+      Events:
+        Schedule1:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 0 ? * * *)
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameters
+              Resource: 
+                # - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/apiGatewayURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/ClientID
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/ClientSecret
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/GrantType
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/OAuthTokenURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/ScopeURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/Switch/SwitchBaseURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/ClientID
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/ClientSecret
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/GrantType
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/OAuthTokenURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/ScopeURL
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/Switch/SwitchBaseURL 
+            - Effect: Allow
+              Action:
+                - ssm:PutParameter
+                - ssm:GetParameters
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/BearerToken
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/QA/BearerToken
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:Encrypt
+              Resource:
+                - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/e449cd4b-182d-4a82-a0ff-0998beaa635f
+
+  CheckSubscriptionFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${CheckSubscriptionFunction}
+
+# Uncomment this for default url
+# Outputs:
+#   EventHandlerApi:
+#     Description: The API for powerlimit webhook subscriptions URL
+    # Value: !Sub https://${EventHandlerApi}.execute-api.${AWS::Region}.amazonaws.com/prod/powerlimit
